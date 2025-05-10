@@ -1,0 +1,14 @@
+# Dependencies
+node_modules
+
+# Firebase credentials
+serviceAccountKey.json
+
+# Uploaded files
+uploads/
+
+# Expo files
+.expo/
+
+# Environment variables
+.env
