@@ -11,7 +11,7 @@ if (process.env.FIREBASE_CONFIG) {
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: 'clicks-25b5a' // Replace with your actual project ID
+  storageBucket: 'clicks-25b5a.appspot.com' // Replace with your actual project ID
 });
 
 const bucket = admin.storage().bucket();
