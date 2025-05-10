@@ -4,7 +4,7 @@ const cors = require('cors');
 const { bucket } = require('./firebase-config');
 
 const app = express();
-const PORT = 5500;
+const PORT = process.env.PORT || 5500;
 
 // CORS configuration (keeping your existing code)
 app.use(cors({
@@ -124,9 +124,38 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// We don't need the create-folder endpoint anymore, as folders are automatically created in Firebase
+// Add the create-folder endpoint for backward compatibility
+app.post('/upload/create-folder', (req, res) => {
+  console.log('Create folder request received', req.query);
+  const { address } = req.query;
 
-// We don't need to serve files from the server anymore as Firebase handles this
+  if (!address) {
+    return res.status(400).json({
+      success: false,
+      error: 'Address is required'
+    });
+  }
+
+  try {
+    // With Firebase, folders are created automatically when files are uploaded
+    // We don't need to explicitly create them, so we just return success
+    const folderName = address.replace(/[^a-z0-9]/gi, '_');
+    console.log('Folder for Firebase will be created automatically:', folderName);
+    
+    res.json({
+      success: true,
+      message: 'Folder will be created automatically on first upload',
+      path: folderName
+    });
+  } catch (error) {
+    console.error('Error processing folder request:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to process folder request',
+      details: error.message
+    });
+  }
+});
 
 // Global error handler (keeping your existing code)
 app.use((err, req, res, next) => {
