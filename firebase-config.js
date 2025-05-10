@@ -1,10 +1,17 @@
-// firebase-config.js
 const admin = require('firebase-admin');
-const serviceAccount = require('./serviceAccountKey.json'); // You'll create this file in Step 4
+
+let serviceAccount;
+if (process.env.FIREBASE_CONFIG) {
+  // When deployed (on Render.com)
+  serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
+} else {
+  // Local development
+  serviceAccount = require('./serviceAccountKey.json');
+}
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: 'clicks-25b5a' // You'll replace this with your Firebase project ID
+  storageBucket: 'clicks-25b5a' // Replace with your actual project ID
 });
 
 const bucket = admin.storage().bucket();
