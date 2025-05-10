@@ -9,11 +9,15 @@ if (process.env.FIREBASE_CONFIG) {
   serviceAccount = require('./serviceAccountKey.json');
 }
 
+// Initialize Firebase with the correct bucket name
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  storageBucket: 'clicks-25b5a.appspot.com' // Replace with your actual project ID
+  storageBucket: 'clicks-25b5a.firebasestorage.app'  // <-- Updated bucket name
 });
 
 const bucket = admin.storage().bucket();
+
+// Log bucket info for debugging
+console.log('Using Firebase Storage bucket:', bucket.name);
 
 module.exports = { admin, bucket };
