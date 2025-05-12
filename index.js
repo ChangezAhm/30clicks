@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
+const archiver = require('archiver');
 const { bucket } = require('./firebase-config');
 
 const app = express();
@@ -167,6 +168,49 @@ app.post('/upload/create-folder', (req, res) => {
   }
 });
 
+// Download photos endpoint - creates a ZIP file of all photos in a folder
+app.get('/download-photos/:address', async (req, res) => {
+  try {
+    const { address } = req.params;
+    const folderName = address.replace(/[^a-z0-9]/gi, '_');
+    
+    console.log(`Creating download for folder: ${folderName}`);
+    
+    // Create a zip archive
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    
+    // Set response headers
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${address}-photos.zip"`);
+    
+    // Pipe archive to response
+    archive.pipe(res);
+    
+    // Get all files in the folder
+    const [files] = await bucket.getFiles({ prefix: folderName + '/' });
+    
+    console.log(`Found ${files.length} files in folder ${folderName}`);
+    
+    // Add each file to the archive
+    for (const file of files) {
+      if (file.name !== folderName + '/') { // Skip the folder itself
+        const stream = file.createReadStream();
+        const fileName = file.name.split('/').pop();
+        archive.append(stream, { name: fileName });
+      }
+    }
+    
+    // Finalize the archive
+    archive.finalize();
+  } catch (error) {
+    console.error('Download error:', error);
+    res.status(500).json({ 
+      error: 'Failed to create download', 
+      details: error.message 
+    });
+  }
+});
+
 // Add print notification endpoint
 app.post('/notify-print', async (req, res) => {
   try {
@@ -175,6 +219,7 @@ app.post('/notify-print', async (req, res) => {
     console.log('Print notification received:', { address, photoCount, skipToPrint });
     
     const actualPhotoCount = 30 - photoCount;
+    const folderName = address.replace(/[^a-z0-9]/gi, '_');
     
     // Send email notification
     const emailSubject = skipToPrint 
@@ -186,6 +231,24 @@ app.post('/notify-print', async (req, res) => {
       <p><strong>Address:</strong> ${address}</p>
       <p><strong>Photos taken:</strong> ${actualPhotoCount}/30</p>
       <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
+      
+      <h3>📥 Download Options:</h3>
+      <div style="background-color: #e8f4fd; padding: 15px; margin: 20px 0; border-radius: 5px;">
+        <h4>Option 1: One-Click Download (Recommended)</h4>
+        <p>
+          <a href="https://three0clicks.onrender.com/download-photos/${address}" 
+             style="background-color: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">
+            📁 Download All Photos as ZIP
+          </a>
+        </p>
+      </div>
+      
+      <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
+        <h4>Option 2: Manual Download</h4>
+        <p>1. Go to <a href="https://console.cloud.google.com/storage/browser/clicks-25b5a.firebasestorage.app/${folderName}">Google Cloud Console</a></p>
+        <p>2. Select all photos individually and download</p>
+      </div>
+      
       <p><strong>User Details:</strong></p>
       <ul>
         <li><strong>Username:</strong> ${userDetails.username}</li>
@@ -193,19 +256,6 @@ app.post('/notify-print', async (req, res) => {
         <li><strong>House Number:</strong> ${userDetails.houseNumber}</li>
       </ul>
       <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
-      
-      <h3>🔗 Quick Links:</h3>
-      <p>Firebase Storage folder: <code>${address.replace(/[^a-z0-9]/gi, '_')}</code></p>
-      
-      <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
-        <h4>📍 Print Instructions:</h4>
-        <ol>
-          <li>Go to Firebase Storage console</li>
-          <li>Navigate to folder: <code>${address.replace(/[^a-z0-9]/gi, '_')}</code></li>
-          <li>Download all ${actualPhotoCount} photos</li>
-          <li>Print them for ${address}</li>
-        </ol>
-      </div>
     `;
     
     await transporter.sendMail({
