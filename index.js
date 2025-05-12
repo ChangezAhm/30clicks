@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
+const nodemailer = require('nodemailer');
 const { bucket } = require('./firebase-config');
 
 const app = express();
@@ -16,6 +17,15 @@ app.use(cors({
 }));
 
 app.use(express.json());
+
+// Configure email transporter
+const transporter = nodemailer.createTransporter({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD
+  }
+});
 
 // Set up multer for memory storage (instead of disk)
 const upload = multer({
@@ -152,6 +162,70 @@ app.post('/upload/create-folder', (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to process folder request',
+      details: error.message
+    });
+  }
+});
+
+// Add print notification endpoint
+app.post('/notify-print', async (req, res) => {
+  try {
+    const { address, photoCount, userDetails, skipToPrint } = req.body;
+    
+    console.log('Print notification received:', { address, photoCount, skipToPrint });
+    
+    const actualPhotoCount = 30 - photoCount;
+    
+    // Send email notification
+    const emailSubject = skipToPrint 
+      ? `⏩ PRINT REQUEST: ${address} (${actualPhotoCount} photos - SKIPPED TO PRINT)`
+      : `✅ PRINT REQUEST: ${address} (${actualPhotoCount} photos - FULL ROLL)`;
+    
+    const emailHtml = `
+      <h2>🖨️ New Print Request</h2>
+      <p><strong>Address:</strong> ${address}</p>
+      <p><strong>Photos taken:</strong> ${actualPhotoCount}/30</p>
+      <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
+      <p><strong>User Details:</strong></p>
+      <ul>
+        <li><strong>Username:</strong> ${userDetails.username}</li>
+        <li><strong>Postcode:</strong> ${userDetails.postcode}</li>
+        <li><strong>House Number:</strong> ${userDetails.houseNumber}</li>
+      </ul>
+      <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+      
+      <h3>🔗 Quick Links:</h3>
+      <p>Firebase Storage folder: <code>${address.replace(/[^a-z0-9]/gi, '_')}</code></p>
+      
+      <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
+        <h4>📍 Print Instructions:</h4>
+        <ol>
+          <li>Go to Firebase Storage console</li>
+          <li>Navigate to folder: <code>${address.replace(/[^a-z0-9]/gi, '_')}</code></li>
+          <li>Download all ${actualPhotoCount} photos</li>
+          <li>Print them for ${address}</li>
+        </ol>
+      </div>
+    `;
+    
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: process.env.FOUNDER_EMAIL,
+      subject: emailSubject,
+      html: emailHtml
+    });
+    
+    console.log('Print notification email sent successfully');
+    
+    res.json({
+      success: true,
+      message: 'Print notification sent'
+    });
+  } catch (error) {
+    console.error('Error sending print notification:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to send notification',
       details: error.message
     });
   }
