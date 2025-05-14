@@ -4,10 +4,20 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const archiver = require('archiver');
 const { bucket } = require('./firebase-config');
-const { uploadToDropboxFromFirebase } = require('./dropbox-utils');
+const { uploadToDropboxFromFirebase, dropboxAuth } = require('./dropbox-utils');
 
 const app = express();
 const PORT = process.env.PORT || 5500;
+
+// Scheduled token refresh every 3 hours
+setInterval(async () => {
+  try {
+    await dropboxAuth.refreshAccessToken();
+    console.log('⏰ Scheduled token refresh completed');
+  } catch (error) {
+    console.error('❌ Scheduled token refresh failed:', error);
+  }
+}, 3 * 60 * 60 * 1000); // 3 hours
 
 // CORS configuration
 app.use(cors({
@@ -21,7 +31,7 @@ app.use(cors({
 app.use(express.json());
 
 // Configure email transporter
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -136,7 +146,7 @@ app.get('/download-photos/:address', async (req, res) => {
   }
 });
 
-// ✅ /notify-print: now includes Dropbox upload
+// ✅ /notify-print: now includes Dropbox upload with token refresh
 app.post('/notify-print', async (req, res) => {
   try {
     const { address, photoCount, userDetails, skipToPrint } = req.body;
@@ -145,7 +155,7 @@ app.post('/notify-print', async (req, res) => {
     const actualPhotoCount = 30 - photoCount;
     const folderName = address.replace(/[^a-z0-9]/gi, '_');
 
-    // ✅ Upload each image to Dropbox
+    // ✅ Upload each image to Dropbox with automatic token refresh
     const folderPrefix = `${folderName}/`;
     const [files] = await bucket.getFiles({ prefix: folderPrefix });
 
@@ -180,6 +190,11 @@ app.post('/notify-print', async (req, res) => {
         <h4>Option 2: Manual Download</h4>
         <p>1. Go to <a href="https://console.cloud.google.com/storage/browser/clicks-25b5a.firebasestorage.app/${folderName}">Google Cloud Console</a></p>
         <p>2. Select all photos individually and download</p>
+      </div>
+      <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
+        <h4>Option 3: Dropbox (Auto-synced)</h4>
+        <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
+        <p><small>Photos are automatically uploaded to Dropbox for your convenience</small></p>
       </div>
       <p><strong>User Details:</strong></p>
       <ul>
@@ -219,6 +234,16 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`→ http://localhost:${PORT}`);
   console.log(`→ http://<YOUR_LOCAL_IP>:${PORT}`);
   console.log('=================================');
+  
+  // Initial token refresh on startup
+  setTimeout(async () => {
+    try {
+      await dropboxAuth.refreshAccessToken();
+      console.log('🚀 Initial Dropbox token refresh completed');
+    } catch (error) {
+      console.error('❌ Initial token refresh failed:', error);
+    }
+  }, 2000);
 });
 
 // Graceful shutdown
