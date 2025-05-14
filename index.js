@@ -146,77 +146,119 @@ app.get('/download-photos/:address', async (req, res) => {
   }
 });
 
-// ✅ /notify-print: now includes Dropbox upload with token refresh
+// ✅ /notify-print: INSTANT response with background processing
 app.post('/notify-print', async (req, res) => {
   try {
     const { address, photoCount, userDetails, skipToPrint } = req.body;
     console.log('Print notification received:', { address, photoCount, skipToPrint });
 
-    const actualPhotoCount = 30 - photoCount;
-    const folderName = address.replace(/[^a-z0-9]/gi, '_');
-
-    // ✅ Upload each image to Dropbox with automatic token refresh
-    const folderPrefix = `${folderName}/`;
-    const [files] = await bucket.getFiles({ prefix: folderPrefix });
-
-    for (const file of files) {
-      if (file.name !== folderPrefix) {
-        const filename = file.name.split('/').pop();
-        const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
-        try {
-          await uploadToDropboxFromFirebase(file.name, dropboxPath);
-        } catch (err) {
-          console.error(`❌ Failed to upload ${filename} to Dropbox:`, err.message);
-        }
-      }
-    }
-
-    // ✅ Send email
-    const emailSubject = skipToPrint 
-      ? `⏩ PRINT REQUEST: ${address} (${actualPhotoCount} photos - SKIPPED TO PRINT)`
-      : `✅ PRINT REQUEST: ${address} (${actualPhotoCount} photos - FULL ROLL)`;
-
-    const emailHtml = `
-      <h2>🖨️ New Print Request</h2>
-      <p><strong>Address:</strong> ${address}</p>
-      <p><strong>Photos taken:</strong> ${actualPhotoCount}/30</p>
-      <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
-      <h3>📥 Download Options:</h3>
-      <div style="background-color: #e8f4fd; padding: 15px; margin: 20px 0; border-radius: 5px;">
-        <h4>Option 1: One-Click Download (Recommended)</h4>
-        <p><a href="https://three0clicks.onrender.com/download-photos/${address}" style="background-color: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">📁 Download All Photos as ZIP</a></p>
-      </div>
-      <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
-        <h4>Option 2: Manual Download</h4>
-        <p>1. Go to <a href="https://console.cloud.google.com/storage/browser/clicks-25b5a.firebasestorage.app/${folderName}">Google Cloud Console</a></p>
-        <p>2. Select all photos individually and download</p>
-      </div>
-      <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
-        <h4>Option 3: Dropbox (Auto-synced)</h4>
-        <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
-        <p><small>Photos are automatically uploaded to Dropbox for your convenience</small></p>
-      </div>
-      <p><strong>User Details:</strong></p>
-      <ul>
-        <li><strong>Username:</strong> ${userDetails.username}</li>
-        <li><strong>Postcode:</strong> ${userDetails.postcode}</li>
-        <li><strong>House Number:</strong> ${userDetails.houseNumber}</li>
-      </ul>
-      <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
-    `;
-
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: process.env.FOUNDER_EMAIL,
-      subject: emailSubject,
-      html: emailHtml
+    // ✅ IMMEDIATELY respond to the app - don't make user wait
+    res.json({ 
+      success: true, 
+      message: 'Print request received. Processing in background...' 
     });
 
-    console.log('Print notification email sent successfully');
-    res.json({ success: true, message: 'Print notification sent' });
+    // ✅ Process everything in background (async, non-blocking)
+    setImmediate(async () => {
+      try {
+        const actualPhotoCount = 30 - photoCount;
+        const folderName = address.replace(/[^a-z0-9]/gi, '_');
+
+        // Background task 1: Upload to Dropbox (parallel)
+        const dropboxPromise = (async () => {
+          try {
+            const folderPrefix = `${folderName}/`;
+            const [files] = await bucket.getFiles({ prefix: folderPrefix });
+
+            // Upload files in parallel for speed
+            const uploadPromises = files
+              .filter(file => file.name !== folderPrefix)
+              .map(async (file) => {
+                const filename = file.name.split('/').pop();
+                const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
+                try {
+                  await uploadToDropboxFromFirebase(file.name, dropboxPath);
+                  console.log(`✅ Uploaded ${filename} to Dropbox`);
+                } catch (err) {
+                  console.error(`❌ Failed to upload ${filename} to Dropbox:`, err.message);
+                }
+              });
+
+            await Promise.all(uploadPromises);
+            console.log('📦 All Dropbox uploads completed');
+          } catch (error) {
+            console.error('Dropbox batch upload error:', error);
+          }
+        })();
+
+        // Background task 2: Send email (parallel)
+        const emailPromise = (async () => {
+          try {
+            const emailSubject = skipToPrint 
+              ? `⏩ PRINT REQUEST: ${address} (${actualPhotoCount} photos - SKIPPED TO PRINT)`
+              : `✅ PRINT REQUEST: ${address} (${actualPhotoCount} photos - FULL ROLL)`;
+
+            const emailHtml = `
+              <h2>🖨️ New Print Request</h2>
+              <p><strong>Address:</strong> ${address}</p>
+              <p><strong>Photos taken:</strong> ${actualPhotoCount}/30</p>
+              <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
+              <h3>📥 Download Options:</h3>
+              <div style="background-color: #e8f4fd; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h4>Option 1: One-Click Download (Recommended)</h4>
+                <p><a href="https://three0clicks.onrender.com/download-photos/${address}" style="background-color: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">📁 Download All Photos as ZIP</a></p>
+              </div>
+              <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h4>Option 2: Manual Download</h4>
+                <p>1. Go to <a href="https://console.cloud.google.com/storage/browser/clicks-25b5a.firebasestorage.app/${folderName}">Google Cloud Console</a></p>
+                <p>2. Select all photos individually and download</p>
+              </div>
+              <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h4>Option 3: Dropbox (Auto-synced)</h4>
+                <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
+                <p><small>Photos are automatically uploaded to Dropbox for your convenience</small></p>
+              </div>
+              <p><strong>User Details:</strong></p>
+              <ul>
+                <li><strong>Username:</strong> ${userDetails.username}</li>
+                <li><strong>Postcode:</strong> ${userDetails.postcode}</li>
+                <li><strong>House Number:</strong> ${userDetails.houseNumber}</li>
+              </ul>
+              <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
+            `;
+
+            await transporter.sendMail({
+              from: process.env.EMAIL_USER,
+              to: process.env.FOUNDER_EMAIL,
+              subject: emailSubject,
+              html: emailHtml
+            });
+
+            console.log('📧 Print notification email sent successfully');
+          } catch (error) {
+            console.error('Email sending error:', error);
+          }
+        })();
+
+        // Run both tasks in parallel
+        await Promise.all([dropboxPromise, emailPromise]);
+        console.log('🎉 All background tasks completed for', address);
+
+      } catch (error) {
+        console.error('Background processing error:', error);
+      }
+    });
+
   } catch (error) {
-    console.error('Error sending print notification:', error);
-    res.status(500).json({ success: false, error: 'Failed to send notification', details: error.message });
+    console.error('Error in notify-print endpoint:', error);
+    // Still respond immediately even if there's an error
+    if (!res.headersSent) {
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to process request', 
+        details: error.message 
+      });
+    }
   }
 });
 
