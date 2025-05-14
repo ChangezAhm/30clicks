@@ -4,6 +4,7 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const archiver = require('archiver');
 const { bucket } = require('./firebase-config');
+const { uploadToDropboxFromFirebase } = require('./dropbox-utils');
 
 const app = express();
 const PORT = process.env.PORT || 5500;
