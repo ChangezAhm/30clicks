@@ -16,8 +16,11 @@ let driveService;
 async function initializeGoogleDrive() {
   try {
     // Decode the base64 encoded credentials
-    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString();
+    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString('utf-8');
     const credentials = JSON.parse(credentialsJson);
+    
+    // Fix potential line ending issues in private key
+    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
     
     const auth = new google.auth.GoogleAuth({
       credentials,
@@ -46,11 +49,30 @@ async function debugGoogleAuth() {
     }
     
     // 2. Try to decode and parse credentials
-    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString();
+    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString('utf-8');
     const credentials = JSON.parse(credentialsJson);
+    
+    // Fix potential line ending issues in private key
+    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
+    
     console.log('✅ Credentials decoded successfully');
     console.log('📧 Service Account Email:', credentials.client_email);
     console.log('🆔 Project ID:', credentials.project_id);
+    console.log('🔑 Private Key Length:', credentials.private_key.length);
+    console.log('🔑 Private Key Format:', credentials.private_key.includes('-----BEGIN PRIVATE KEY-----') ? 'Standard' : 'Non-standard');
+    
+    // Try to create auth object with fixed credentials
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/drive.file'],
+    });
+    
+    // Try to get access token
+    const client = await auth.getClient();
+    console.log('✅ Auth client created successfully');
+    
+    const accessToken = await client.getAccessToken();
+    console.log('✅ Access token obtained successfully');
     
     // 3. Test a simple API call
     if (driveService) {
@@ -66,6 +88,7 @@ async function debugGoogleAuth() {
     console.error('❌ Google Auth Debug Error:', error);
     if (error.message) console.error('Error message:', error.message);
     if (error.code) console.error('Error code:', error.code);
+    if (error.opensslErrorStack) console.error('OpenSSL Error:', error.opensslErrorStack);
   }
 }
 
