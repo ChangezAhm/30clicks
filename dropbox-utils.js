@@ -90,21 +90,78 @@ async function uploadToDropboxFromFirebase(filePath, dropboxPath) {
     });
 
     if (!response.ok) {
-      const err = await response.text();
-      console.error('Dropbox upload failed:', err);
-      throw new Error('Failed to upload to Dropbox');
+      const errorText = await response.text();
+      let errorDetails;
+      
+      try {
+        errorDetails = JSON.parse(errorText);
+      } catch (e) {
+        errorDetails = { error_summary: errorText };
+      }
+      
+      console.error('Dropbox upload failed:', errorDetails);
+      
+      // Check if it's a rate limit error
+      if (errorDetails.error_summary && errorDetails.error_summary.includes('too_many_write_operations')) {
+        const retryAfter = errorDetails.error?.retry_after || 1;
+        console.log(`⚠️ Rate limited. Retry suggested after ${retryAfter}s`);
+        
+        // Throw a special error that includes retry info
+        const rateLimitError = new Error('Rate limited by Dropbox');
+        rateLimitError.isRateLimit = true;
+        rateLimitError.retryAfter = retryAfter * 1000; // Convert to milliseconds
+        throw rateLimitError;
+      }
+      
+      throw new Error(`Failed to upload to Dropbox: ${response.status} ${errorDetails.error_summary || errorText}`);
     }
 
     console.log('✅ Uploaded to Dropbox:', dropboxPath);
     return await response.json();
   } catch (error) {
+    // Re-throw with additional context
+    if (error.isRateLimit) {
+      throw error; // Preserve rate limit info
+    }
+    
     console.error('❌ Dropbox upload error:', error);
     throw error;
+  }
+}
+
+// Enhanced upload function with built-in retry logic
+async function uploadToDropboxWithRetry(filePath, dropboxPath, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await uploadToDropboxFromFirebase(filePath, dropboxPath);
+    } catch (error) {
+      console.log(`Upload attempt ${attempt}/${maxRetries} failed for ${dropboxPath}`);
+      
+      if (attempt < maxRetries) {
+        let delay = 2000; // Default 2 second delay
+        
+        // If it's a rate limit error, use the suggested retry time
+        if (error.isRateLimit && error.retryAfter) {
+          delay = Math.max(error.retryAfter, 1000); // At least 1 second
+          console.log(`Rate limited. Waiting ${delay/1000}s before retry...`);
+        } else {
+          // Exponential backoff for other errors
+          delay = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          console.log(`Waiting ${delay/1000}s before retry...`);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`Failed to upload to Dropbox after ${maxRetries} attempts:`, error.message);
+        throw error;
+      }
+    }
   }
 }
 
 // Export the token manager for use in index.js
 module.exports = { 
   uploadToDropboxFromFirebase,
+  uploadToDropboxWithRetry,
   dropboxAuth
 };

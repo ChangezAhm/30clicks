@@ -4,7 +4,7 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const archiver = require('archiver');
 const { bucket } = require('./firebase-config');
-const { uploadToDropboxFromFirebase, dropboxAuth } = require('./dropbox-utils');
+const { uploadToDropboxFromFirebase, uploadToDropboxWithRetry, dropboxAuth } = require('./dropbox-utils');
 
 const app = express();
 const PORT = process.env.PORT || 5500;
@@ -164,27 +164,60 @@ app.post('/notify-print', async (req, res) => {
         const actualPhotoCount = 30 - photoCount;
         const folderName = address.replace(/[^a-z0-9]/gi, '_');
 
-        // Background task 1: Upload to Dropbox (parallel)
+        // Background task 1: Upload to Dropbox with delays (sequential with retries)
         const dropboxPromise = (async () => {
           try {
+            console.log(`📦 Starting Dropbox upload for ${folderName}...`);
+            
+            // Wait a bit for Firebase uploads to fully complete
+            console.log('⏳ Waiting 3 seconds for Firebase uploads to settle...');
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
             const folderPrefix = `${folderName}/`;
             const [files] = await bucket.getFiles({ prefix: folderPrefix });
+            const filesToUpload = files.filter(file => file.name !== folderPrefix);
+            
+            console.log(`📁 Found ${filesToUpload.length} files to upload to Dropbox`);
 
-            // Upload files in parallel for speed
-            const uploadPromises = files
-              .filter(file => file.name !== folderPrefix)
-              .map(async (file) => {
-                const filename = file.name.split('/').pop();
-                const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
+            // Upload files SEQUENTIALLY with delays to avoid rate limiting
+            for (let i = 0; i < filesToUpload.length; i++) {
+              const file = filesToUpload[i];
+              const filename = file.name.split('/').pop();
+              const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
+              
+              console.log(`📤 Uploading ${i + 1}/${filesToUpload.length}: ${filename}`);
+              
+              // Retry logic for individual files
+              let retryCount = 0;
+              const maxRetries = 3;
+              let uploaded = false;
+              
+              while (!uploaded && retryCount < maxRetries) {
                 try {
                   await uploadToDropboxFromFirebase(file.name, dropboxPath);
-                  console.log(`✅ Uploaded ${filename} to Dropbox`);
+                  console.log(`✅ Uploaded ${filename} to Dropbox (attempt ${retryCount + 1})`);
+                  uploaded = true;
                 } catch (err) {
-                  console.error(`❌ Failed to upload ${filename} to Dropbox:`, err.message);
+                  retryCount++;
+                  console.warn(`⚠️ Upload failed for ${filename} (attempt ${retryCount}/${maxRetries}):`, err.message);
+                  
+                  if (retryCount < maxRetries) {
+                    // Exponential backoff: 2s, 4s, 8s
+                    const backoffDelay = Math.min(2000 * Math.pow(2, retryCount - 1), 8000);
+                    console.log(`⏳ Retrying in ${backoffDelay / 1000}s...`);
+                    await new Promise(resolve => setTimeout(resolve, backoffDelay));
+                  } else {
+                    console.error(`❌ Failed to upload ${filename} after ${maxRetries} attempts`);
+                  }
                 }
-              });
-
-            await Promise.all(uploadPromises);
+              }
+              
+              // Add delay between files to avoid rate limiting (1.5 seconds)
+              if (i < filesToUpload.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1500));
+              }
+            }
+            
             console.log('📦 All Dropbox uploads completed');
           } catch (error) {
             console.error('Dropbox batch upload error:', error);
@@ -216,7 +249,7 @@ app.post('/notify-print', async (req, res) => {
               <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
                 <h4>Option 3: Dropbox (Auto-synced)</h4>
                 <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
-                <p><small>Photos are automatically uploaded to Dropbox for your convenience</small></p>
+                <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 1-2 minutes to complete.</small></p>
               </div>
               <p><strong>User Details:</strong></p>
               <ul>
