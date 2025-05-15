@@ -1,13 +1,41 @@
+# First, install the required packages
+# Run: npm install googleapis
+
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const archiver = require('archiver');
+const { google } = require('googleapis');
 const { bucket } = require('./firebase-config');
 const { uploadToDropboxFromFirebase, uploadToDropboxWithRetry, dropboxAuth } = require('./dropbox-utils');
 
 const app = express();
 const PORT = process.env.PORT || 5500;
+
+// Initialize Google Drive API
+let driveService;
+
+async function initializeGoogleDrive() {
+  try {
+    // Decode the base64 encoded credentials
+    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString();
+    const credentials = JSON.parse(credentialsJson);
+    
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/drive.file'],
+    });
+
+    driveService = google.drive({ version: 'v3', auth });
+    console.log('✅ Google Drive API initialized successfully');
+  } catch (error) {
+    console.error('❌ Failed to initialize Google Drive:', error);
+  }
+}
+
+// Call initialization on startup
+initializeGoogleDrive();
 
 // Scheduled token refresh every 3 hours
 setInterval(async () => {
@@ -31,7 +59,7 @@ app.use(cors({
 app.use(express.json());
 
 // Configure email transporter
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -102,6 +130,81 @@ app.post('/upload', (req, res) => {
   });
 });
 
+// Function to upload to Google Drive
+async function uploadToGoogleDrive(filePath, fileName, parentFolderId = null) {
+  try {
+    if (!driveService) {
+      throw new Error('Google Drive service not initialized');
+    }
+
+    // Get file from Firebase
+    const file = bucket.file(filePath);
+    const [buffer] = await file.download();
+
+    // Create file metadata
+    const fileMetadata = {
+      name: fileName,
+      parents: parentFolderId ? [parentFolderId] : undefined,
+    };
+
+    // Get file type
+    const mimeType = 'image/jpeg'; // Assuming all files are JPEG
+
+    // Upload to Google Drive
+    const drive = await driveService.files.create({
+      resource: fileMetadata,
+      media: {
+        mimeType,
+        body: buffer,
+      },
+    });
+
+    console.log(`✅ Uploaded ${fileName} to Google Drive:`, drive.data.id);
+    return drive.data;
+  } catch (error) {
+    console.error(`❌ Error uploading ${fileName} to Google Drive:`, error);
+    throw error;
+  }
+}
+
+// Function to create folder in Google Drive
+async function createGoogleDriveFolder(folderName, parentFolderId = null) {
+  try {
+    if (!driveService) {
+      throw new Error('Google Drive service not initialized');
+    }
+
+    // Check if folder already exists
+    const existingFolders = await driveService.files.list({
+      q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder'${parentFolderId ? ` and '${parentFolderId}' in parents` : ''}`,
+      fields: 'files(id, name)',
+    });
+
+    if (existingFolders.data.files && existingFolders.data.files.length > 0) {
+      console.log(`📁 Folder '${folderName}' already exists`);
+      return existingFolders.data.files[0];
+    }
+
+    // Create new folder
+    const fileMetadata = {
+      name: folderName,
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: parentFolderId ? [parentFolderId] : undefined,
+    };
+
+    const folder = await driveService.files.create({
+      resource: fileMetadata,
+      fields: 'id, name',
+    });
+
+    console.log(`✅ Created Google Drive folder '${folderName}':`, folder.data.id);
+    return folder.data;
+  } catch (error) {
+    console.error(`❌ Error creating Google Drive folder '${folderName}':`, error);
+    throw error;
+  }
+}
+
 // Create folder endpoint (Firebase auto-creates)
 app.post('/upload/create-folder', (req, res) => {
   const { address } = req.query;
@@ -146,7 +249,7 @@ app.get('/download-photos/:address', async (req, res) => {
   }
 });
 
-// ✅ /notify-print: INSTANT response with background processing (FIXED - SEQUENTIAL UPLOADS)
+// ✅ /notify-print: INSTANT response with background processing (WITH GOOGLE DRIVE)
 app.post('/notify-print', async (req, res) => {
   try {
     const { address, photoCount, userDetails, skipToPrint } = req.body;
@@ -164,74 +267,85 @@ app.post('/notify-print', async (req, res) => {
         const actualPhotoCount = 30 - photoCount;
         const folderName = address.replace(/[^a-z0-9]/gi, '_');
 
-        // Background task 1: Upload to Dropbox with delays (SEQUENTIAL - NOT PARALLEL)
-        const dropboxPromise = (async () => {
+        // Get the total number of photos in the folder
+        const folderPrefix = `${folderName}/`;
+        const [files] = await bucket.getFiles({ prefix: folderPrefix });
+        const totalPhotoCount = files.filter(file => file.name !== folderPrefix).length;
+
+        // Background task 1: Upload to Dropbox and Google Drive (parallel)
+        const uploadPromise = (async () => {
           try {
-            console.log(`📦 Starting SEQUENTIAL Dropbox upload for ${folderName}...`);
+            console.log(`📦 Starting uploads for ${folderName}...`);
             
-            // Wait longer for Firebase uploads to fully complete
+            // Wait for Firebase uploads to settle
             console.log('⏳ Waiting 5 seconds for Firebase uploads to settle...');
             await new Promise(resolve => setTimeout(resolve, 5000));
             
-            const folderPrefix = `${folderName}/`;
-            const [files] = await bucket.getFiles({ prefix: folderPrefix });
             const filesToUpload = files.filter(file => file.name !== folderPrefix);
-            
-            console.log(`📁 Found ${filesToUpload.length} files to upload to Dropbox`);
+            console.log(`📁 Found ${filesToUpload.length} files to upload`);
 
-            // ✅ SEQUENTIAL UPLOADS - ONE BY ONE (NOT Promise.all)
+            // Create Google Drive folder first
+            let driveFolder = null;
+            try {
+              driveFolder = await createGoogleDriveFolder(folderName, process.env.GOOGLE_DRIVE_FOLDER_ID);
+            } catch (error) {
+              console.error('Error creating Google Drive folder:', error);
+            }
+
+            // Upload to Dropbox and Google Drive sequentially for each file
             for (let i = 0; i < filesToUpload.length; i++) {
               const file = filesToUpload[i];
               const filename = file.name.split('/').pop();
-              const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
               
               console.log(`📤 Uploading ${i + 1}/${filesToUpload.length}: ${filename}`);
               
-              // Retry logic for individual files
+              // Upload to Dropbox (with retry logic)
+              const dropboxPath = `/30-clicks-import/${folderName}/${filename}`;
+              let dropboxSuccess = false;
               let retryCount = 0;
               const maxRetries = 3;
-              let uploaded = false;
               
-              while (!uploaded && retryCount < maxRetries) {
+              while (!dropboxSuccess && retryCount < maxRetries) {
                 try {
                   await uploadToDropboxFromFirebase(file.name, dropboxPath);
                   console.log(`✅ Uploaded ${filename} to Dropbox (attempt ${retryCount + 1})`);
-                  uploaded = true;
+                  dropboxSuccess = true;
                 } catch (err) {
                   retryCount++;
-                  console.warn(`⚠️ Upload failed for ${filename} (attempt ${retryCount}/${maxRetries}):`, err.message);
+                  console.warn(`⚠️ Dropbox upload failed for ${filename} (attempt ${retryCount}/${maxRetries}):`, err.message);
                   
                   if (retryCount < maxRetries) {
-                    // Handle rate limiting specifically
-                    let backoffDelay = 2000; // Default 2 seconds
-                    
-                    // Check if it's a rate limit error and respect retry_after
+                    let backoffDelay = 2000;
                     if (err.message && err.message.includes('too_many_write_operations')) {
-                      console.log('🚦 Rate limit detected, using longer delay...');
-                      backoffDelay = 5000; // 5 seconds for rate limit
+                      backoffDelay = 5000;
                     } else {
-                      // Exponential backoff for other errors
                       backoffDelay = Math.min(2000 * Math.pow(2, retryCount - 1), 8000);
                     }
-                    
-                    console.log(`⏳ Retrying in ${backoffDelay / 1000}s...`);
                     await new Promise(resolve => setTimeout(resolve, backoffDelay));
-                  } else {
-                    console.error(`❌ Failed to upload ${filename} after ${maxRetries} attempts`);
                   }
                 }
               }
+
+              // Upload to Google Drive (parallel with Dropbox retries)
+              if (driveFolder) {
+                try {
+                  await uploadToGoogleDrive(file.name, filename, driveFolder.id);
+                  console.log(`✅ Uploaded ${filename} to Google Drive`);
+                } catch (error) {
+                  console.error(`❌ Failed to upload ${filename} to Google Drive:`, error);
+                }
+              }
               
-              // Add delay between files to avoid rate limiting (2.5 seconds)
+              // Add delay between files
               if (i < filesToUpload.length - 1) {
                 console.log('⏳ Waiting 2.5s before next upload...');
                 await new Promise(resolve => setTimeout(resolve, 2500));
               }
             }
             
-            console.log('📦 All Dropbox uploads completed');
+            console.log('📦 All uploads completed');
           } catch (error) {
-            console.error('Dropbox batch upload error:', error);
+            console.error('Upload batch error:', error);
           }
         })();
 
@@ -239,13 +353,14 @@ app.post('/notify-print', async (req, res) => {
         const emailPromise = (async () => {
           try {
             const emailSubject = skipToPrint 
-              ? `⏩ PRINT REQUEST: ${address} (${actualPhotoCount} photos - SKIPPED TO PRINT)`
-              : `✅ PRINT REQUEST: ${address} (${actualPhotoCount} photos - FULL ROLL)`;
+              ? `⏩ PRINT REQUEST: ${address} (${totalPhotoCount} photos - SKIPPED TO PRINT)`
+              : `✅ PRINT REQUEST: ${address} (${totalPhotoCount} photos - FULL ROLL)`;
 
             const emailHtml = `
               <h2>🖨️ New Print Request</h2>
               <p><strong>Address:</strong> ${address}</p>
-              <p><strong>Photos taken:</strong> ${actualPhotoCount}/30</p>
+              <p><strong>Total Photos:</strong> ${totalPhotoCount}</p>
+              <p><strong>Photos Taken:</strong> ${actualPhotoCount}/30</p>
               <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
               <h3>📥 Download Options:</h3>
               <div style="background-color: #e8f4fd; padding: 15px; margin: 20px 0; border-radius: 5px;">
@@ -261,6 +376,11 @@ app.post('/notify-print', async (req, res) => {
                 <h4>Option 3: Dropbox (Auto-synced)</h4>
                 <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
                 <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 2-3 minutes to complete.</small></p>
+              </div>
+              <div style="background-color: #e1f5fe; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h4>Option 4: Google Drive (Auto-synced)</h4>
+                <p>📁 Check your Google Drive: <code>/30-clicks-photos/${folderName}/</code></p>
+                <p><small>Photos are automatically uploaded to Google Drive for easy access and sharing.</small></p>
               </div>
               <p><strong>User Details:</strong></p>
               <ul>
@@ -285,7 +405,7 @@ app.post('/notify-print', async (req, res) => {
         })();
 
         // Run both tasks in parallel
-        await Promise.all([dropboxPromise, emailPromise]);
+        await Promise.all([uploadPromise, emailPromise]);
         console.log('🎉 All background tasks completed for', address);
 
       } catch (error) {
