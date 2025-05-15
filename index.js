@@ -34,8 +34,46 @@ async function initializeGoogleDrive() {
   }
 }
 
+// Debug Google Auth function
+async function debugGoogleAuth() {
+  try {
+    console.log('🔍 Debugging Google Auth...');
+    
+    // 1. Check if credentials environment variable exists
+    if (!process.env.GOOGLE_DRIVE_CREDENTIALS) {
+      console.error('❌ GOOGLE_DRIVE_CREDENTIALS environment variable not found');
+      return;
+    }
+    
+    // 2. Try to decode and parse credentials
+    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString();
+    const credentials = JSON.parse(credentialsJson);
+    console.log('✅ Credentials decoded successfully');
+    console.log('📧 Service Account Email:', credentials.client_email);
+    console.log('🆔 Project ID:', credentials.project_id);
+    
+    // 3. Test a simple API call
+    if (driveService) {
+      const testResult = await driveService.files.list({
+        q: "name='test'",
+        pageSize: 1,
+        fields: 'files(id, name)',
+      });
+      console.log('✅ Google Drive API test call successful');
+    }
+    
+  } catch (error) {
+    console.error('❌ Google Auth Debug Error:', error);
+    if (error.message) console.error('Error message:', error.message);
+    if (error.code) console.error('Error code:', error.code);
+  }
+}
+
 // Call initialization on startup
 initializeGoogleDrive();
+
+// Debug auth after initialization
+setTimeout(debugGoogleAuth, 3000);
 
 // Scheduled token refresh every 3 hours
 setInterval(async () => {
@@ -58,8 +96,8 @@ app.use(cors({
 
 app.use(express.json());
 
-// Configure email transporter
-const transporter = nodemailer.createTransport({
+// Configure email transport (NOT changing to transporter as requested)
+const transport = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -295,8 +333,8 @@ app.post('/notify-print', async (req, res) => {
             // Create Google Drive folder first (in 30-clicks-photos folder)
             let driveFolder = null;
             try {
-              // Use the 30-clicks-photos folder ID
-              driveFolder = await createGoogleDriveFolder(folderName, '1SKeC-7SCXia2A0c4kIFFxrlTuEXK2NLj');
+              // Use the environment variable for the folder ID
+              driveFolder = await createGoogleDriveFolder(folderName, process.env.GOOGLE_DRIVE_FOLDER_ID);
             } catch (error) {
               console.error('Error creating Google Drive folder:', error);
             }
@@ -405,7 +443,7 @@ app.post('/notify-print', async (req, res) => {
               <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
             `;
 
-            await transporter.sendMail({
+            await transport.sendMail({
               from: process.env.EMAIL_USER,
               to: process.env.FOUNDER_EMAIL,
               subject: emailSubject,
