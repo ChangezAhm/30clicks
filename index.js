@@ -31,7 +31,7 @@ app.use(cors({
 app.use(express.json());
 
 // Configure email transporter
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -146,7 +146,7 @@ app.get('/download-photos/:address', async (req, res) => {
   }
 });
 
-// ✅ /notify-print: INSTANT response with background processing
+// ✅ /notify-print: INSTANT response with background processing (FIXED - SEQUENTIAL UPLOADS)
 app.post('/notify-print', async (req, res) => {
   try {
     const { address, photoCount, userDetails, skipToPrint } = req.body;
@@ -164,14 +164,14 @@ app.post('/notify-print', async (req, res) => {
         const actualPhotoCount = 30 - photoCount;
         const folderName = address.replace(/[^a-z0-9]/gi, '_');
 
-        // Background task 1: Upload to Dropbox with delays (sequential with retries)
+        // Background task 1: Upload to Dropbox with delays (SEQUENTIAL - NOT PARALLEL)
         const dropboxPromise = (async () => {
           try {
-            console.log(`📦 Starting Dropbox upload for ${folderName}...`);
+            console.log(`📦 Starting SEQUENTIAL Dropbox upload for ${folderName}...`);
             
-            // Wait a bit for Firebase uploads to fully complete
-            console.log('⏳ Waiting 3 seconds for Firebase uploads to settle...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // Wait longer for Firebase uploads to fully complete
+            console.log('⏳ Waiting 5 seconds for Firebase uploads to settle...');
+            await new Promise(resolve => setTimeout(resolve, 5000));
             
             const folderPrefix = `${folderName}/`;
             const [files] = await bucket.getFiles({ prefix: folderPrefix });
@@ -179,7 +179,7 @@ app.post('/notify-print', async (req, res) => {
             
             console.log(`📁 Found ${filesToUpload.length} files to upload to Dropbox`);
 
-            // Upload files SEQUENTIALLY with delays to avoid rate limiting
+            // ✅ SEQUENTIAL UPLOADS - ONE BY ONE (NOT Promise.all)
             for (let i = 0; i < filesToUpload.length; i++) {
               const file = filesToUpload[i];
               const filename = file.name.split('/').pop();
@@ -202,8 +202,18 @@ app.post('/notify-print', async (req, res) => {
                   console.warn(`⚠️ Upload failed for ${filename} (attempt ${retryCount}/${maxRetries}):`, err.message);
                   
                   if (retryCount < maxRetries) {
-                    // Exponential backoff: 2s, 4s, 8s
-                    const backoffDelay = Math.min(2000 * Math.pow(2, retryCount - 1), 8000);
+                    // Handle rate limiting specifically
+                    let backoffDelay = 2000; // Default 2 seconds
+                    
+                    // Check if it's a rate limit error and respect retry_after
+                    if (err.message && err.message.includes('too_many_write_operations')) {
+                      console.log('🚦 Rate limit detected, using longer delay...');
+                      backoffDelay = 5000; // 5 seconds for rate limit
+                    } else {
+                      // Exponential backoff for other errors
+                      backoffDelay = Math.min(2000 * Math.pow(2, retryCount - 1), 8000);
+                    }
+                    
                     console.log(`⏳ Retrying in ${backoffDelay / 1000}s...`);
                     await new Promise(resolve => setTimeout(resolve, backoffDelay));
                   } else {
@@ -212,9 +222,10 @@ app.post('/notify-print', async (req, res) => {
                 }
               }
               
-              // Add delay between files to avoid rate limiting (1.5 seconds)
+              // Add delay between files to avoid rate limiting (2.5 seconds)
               if (i < filesToUpload.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1500));
+                console.log('⏳ Waiting 2.5s before next upload...');
+                await new Promise(resolve => setTimeout(resolve, 2500));
               }
             }
             
@@ -249,7 +260,7 @@ app.post('/notify-print', async (req, res) => {
               <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
                 <h4>Option 3: Dropbox (Auto-synced)</h4>
                 <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
-                <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 1-2 minutes to complete.</small></p>
+                <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 2-3 minutes to complete.</small></p>
               </div>
               <p><strong>User Details:</strong></p>
               <ul>

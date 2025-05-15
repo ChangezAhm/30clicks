@@ -12,3 +12,15 @@ uploads/
 
 # Environment variables
 .env
+
+# Don't commit dependencies or system files
+node_modules/
+.env
+
+# Ignore logs
+*.log
+
+# Ignore secret keys or credentials (just in case)
+firebase-config.json
+firebase-adminsdk-*.json
+node_modules
