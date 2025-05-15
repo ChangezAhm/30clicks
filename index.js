@@ -21,7 +21,10 @@ async function initializeGoogleDrive() {
     
     const auth = new google.auth.GoogleAuth({
       credentials,
-      scopes: ['https://www.googleapis.com/auth/drive.file'],
+      scopes: [
+        'https://www.googleapis.com/auth/drive.file',
+        'https://www.googleapis.com/auth/drive.folder'
+      ],
     });
 
     driveService = google.drive({ version: 'v3', auth });
@@ -56,7 +59,7 @@ app.use(cors({
 app.use(express.json());
 
 // Configure email transporter
-const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -127,7 +130,7 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// Function to upload to Google Drive
+// Function to upload to Google Drive - FIXED VERSION
 async function uploadToGoogleDrive(filePath, fileName, parentFolderId = null) {
   try {
     if (!driveService) {
@@ -144,16 +147,24 @@ async function uploadToGoogleDrive(filePath, fileName, parentFolderId = null) {
       parents: parentFolderId ? [parentFolderId] : undefined,
     };
 
-    // Get file type
-    const mimeType = 'image/jpeg'; // Assuming all files are JPEG
+    // Convert buffer to stream for upload
+    const { Readable } = require('stream');
+    const streamFromBuffer = new Readable({
+      read() {}
+    });
+    streamFromBuffer.push(buffer);
+    streamFromBuffer.push(null); // End the stream
 
-    // Upload to Google Drive
+    // Upload to Google Drive using the stream
+    const media = {
+      mimeType: 'image/jpeg',
+      body: streamFromBuffer
+    };
+
     const drive = await driveService.files.create({
       resource: fileMetadata,
-      media: {
-        mimeType,
-        body: buffer,
-      },
+      media: media,
+      fields: 'id, name'
     });
 
     console.log(`✅ Uploaded ${fileName} to Google Drive:`, drive.data.id);
@@ -269,7 +280,7 @@ app.post('/notify-print', async (req, res) => {
         const [files] = await bucket.getFiles({ prefix: folderPrefix });
         const totalPhotoCount = files.filter(file => file.name !== folderPrefix).length;
 
-        // Background task 1: Upload to Dropbox and Google Drive (parallel)
+        // Background task 1: Upload to Dropbox and Google Drive
         const uploadPromise = (async () => {
           try {
             console.log(`📦 Starting uploads for ${folderName}...`);
@@ -281,10 +292,11 @@ app.post('/notify-print', async (req, res) => {
             const filesToUpload = files.filter(file => file.name !== folderPrefix);
             console.log(`📁 Found ${filesToUpload.length} files to upload`);
 
-            // Create Google Drive folder first
+            // Create Google Drive folder first (in 30-clicks-photos folder)
             let driveFolder = null;
             try {
-              driveFolder = await createGoogleDriveFolder(folderName, process.env.GOOGLE_DRIVE_FOLDER_ID);
+              // Use the 30-clicks-photos folder ID
+              driveFolder = await createGoogleDriveFolder(folderName, '1SKeC-7SCXia2A0c4kIFFxrlTuEXK2NLj');
             } catch (error) {
               console.error('Error creating Google Drive folder:', error);
             }
@@ -323,7 +335,7 @@ app.post('/notify-print', async (req, res) => {
                 }
               }
 
-              // Upload to Google Drive (parallel with Dropbox retries)
+              // Upload to Google Drive (with error handling)
               if (driveFolder) {
                 try {
                   await uploadToGoogleDrive(file.name, filename, driveFolder.id);
@@ -375,9 +387,14 @@ app.post('/notify-print', async (req, res) => {
                 <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 2-3 minutes to complete.</small></p>
               </div>
               <div style="background-color: #e1f5fe; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 4: Google Drive (Auto-synced)</h4>
+                <h4>Option 4: Google Drive (Raw Photos)</h4>
                 <p>📁 Check your Google Drive: <code>/30-clicks-photos/${folderName}/</code></p>
-                <p><small>Photos are automatically uploaded to Google Drive for easy access and sharing.</small></p>
+                <p><small>Raw photos are automatically uploaded to Google Drive for easy access and sharing.</small></p>
+              </div>
+              <div style="background-color: #fce4ec; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <h4>Option 5: Google Drive (Processed Photos)</h4>
+                <p>📁 After Lightroom processing: <code>/30-clicks-processed-photos/${folderName}/</code></p>
+                <p><small>Edited photos will be uploaded here automatically after processing.</small></p>
               </div>
               <p><strong>User Details:</strong></p>
               <ul>
