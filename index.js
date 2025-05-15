@@ -3,100 +3,11 @@ const multer = require('multer');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 const archiver = require('archiver');
-const { google } = require('googleapis');
 const { bucket } = require('./firebase-config');
 const { uploadToDropboxFromFirebase, uploadToDropboxWithRetry, dropboxAuth } = require('./dropbox-utils');
 
 const app = express();
 const PORT = process.env.PORT || 5500;
-
-// Initialize Google Drive API
-let driveService;
-
-async function initializeGoogleDrive() {
-  try {
-    // Decode the base64 encoded credentials
-    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString('utf-8');
-    const credentials = JSON.parse(credentialsJson);
-    
-    // Fix potential line ending issues in private key
-    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
-    
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/drive.folder'
-      ],
-    });
-
-    driveService = google.drive({ version: 'v3', auth });
-    console.log('✅ Google Drive API initialized successfully');
-  } catch (error) {
-    console.error('❌ Failed to initialize Google Drive:', error);
-  }
-}
-
-// Debug Google Auth function
-async function debugGoogleAuth() {
-  try {
-    console.log('🔍 Debugging Google Auth...');
-    
-    // 1. Check if credentials environment variable exists
-    if (!process.env.GOOGLE_DRIVE_CREDENTIALS) {
-      console.error('❌ GOOGLE_DRIVE_CREDENTIALS environment variable not found');
-      return;
-    }
-    
-    // 2. Try to decode and parse credentials
-    const credentialsJson = Buffer.from(process.env.GOOGLE_DRIVE_CREDENTIALS, 'base64').toString('utf-8');
-    const credentials = JSON.parse(credentialsJson);
-    
-    // Fix potential line ending issues in private key
-    credentials.private_key = credentials.private_key.replace(/\\n/g, '\n');
-    
-    console.log('✅ Credentials decoded successfully');
-    console.log('📧 Service Account Email:', credentials.client_email);
-    console.log('🆔 Project ID:', credentials.project_id);
-    console.log('🔑 Private Key Length:', credentials.private_key.length);
-    console.log('🔑 Private Key Format:', credentials.private_key.includes('-----BEGIN PRIVATE KEY-----') ? 'Standard' : 'Non-standard');
-    
-    // Try to create auth object with fixed credentials
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: ['https://www.googleapis.com/auth/drive.file'],
-    });
-    
-    // Try to get access token
-    const client = await auth.getClient();
-    console.log('✅ Auth client created successfully');
-    
-    const accessToken = await client.getAccessToken();
-    console.log('✅ Access token obtained successfully');
-    
-    // 3. Test a simple API call
-    if (driveService) {
-      const testResult = await driveService.files.list({
-        q: "name='test'",
-        pageSize: 1,
-        fields: 'files(id, name)',
-      });
-      console.log('✅ Google Drive API test call successful');
-    }
-    
-  } catch (error) {
-    console.error('❌ Google Auth Debug Error:', error);
-    if (error.message) console.error('Error message:', error.message);
-    if (error.code) console.error('Error code:', error.code);
-    if (error.opensslErrorStack) console.error('OpenSSL Error:', error.opensslErrorStack);
-  }
-}
-
-// Call initialization on startup
-initializeGoogleDrive();
-
-// Debug auth after initialization
-setTimeout(debugGoogleAuth, 3000);
 
 // Scheduled token refresh every 3 hours
 setInterval(async () => {
@@ -119,8 +30,8 @@ app.use(cors({
 
 app.use(express.json());
 
-// Configure email transport (NOT changing to transporter as requested)
-const transport = nodemailer.createTransport({
+// Configure email transport
+const transport = nodemailer.createTransporter({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
@@ -191,89 +102,6 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// Function to upload to Google Drive - FIXED VERSION
-async function uploadToGoogleDrive(filePath, fileName, parentFolderId = null) {
-  try {
-    if (!driveService) {
-      throw new Error('Google Drive service not initialized');
-    }
-
-    // Get file from Firebase
-    const file = bucket.file(filePath);
-    const [buffer] = await file.download();
-
-    // Create file metadata
-    const fileMetadata = {
-      name: fileName,
-      parents: parentFolderId ? [parentFolderId] : undefined,
-    };
-
-    // Convert buffer to stream for upload
-    const { Readable } = require('stream');
-    const streamFromBuffer = new Readable({
-      read() {}
-    });
-    streamFromBuffer.push(buffer);
-    streamFromBuffer.push(null); // End the stream
-
-    // Upload to Google Drive using the stream
-    const media = {
-      mimeType: 'image/jpeg',
-      body: streamFromBuffer
-    };
-
-    const drive = await driveService.files.create({
-      resource: fileMetadata,
-      media: media,
-      fields: 'id, name'
-    });
-
-    console.log(`✅ Uploaded ${fileName} to Google Drive:`, drive.data.id);
-    return drive.data;
-  } catch (error) {
-    console.error(`❌ Error uploading ${fileName} to Google Drive:`, error);
-    throw error;
-  }
-}
-
-// Function to create folder in Google Drive
-async function createGoogleDriveFolder(folderName, parentFolderId = null) {
-  try {
-    if (!driveService) {
-      throw new Error('Google Drive service not initialized');
-    }
-
-    // Check if folder already exists
-    const existingFolders = await driveService.files.list({
-      q: `name='${folderName}' and mimeType='application/vnd.google-apps.folder'${parentFolderId ? ` and '${parentFolderId}' in parents` : ''}`,
-      fields: 'files(id, name)',
-    });
-
-    if (existingFolders.data.files && existingFolders.data.files.length > 0) {
-      console.log(`📁 Folder '${folderName}' already exists`);
-      return existingFolders.data.files[0];
-    }
-
-    // Create new folder
-    const fileMetadata = {
-      name: folderName,
-      mimeType: 'application/vnd.google-apps.folder',
-      parents: parentFolderId ? [parentFolderId] : undefined,
-    };
-
-    const folder = await driveService.files.create({
-      resource: fileMetadata,
-      fields: 'id, name',
-    });
-
-    console.log(`✅ Created Google Drive folder '${folderName}':`, folder.data.id);
-    return folder.data;
-  } catch (error) {
-    console.error(`❌ Error creating Google Drive folder '${folderName}':`, error);
-    throw error;
-  }
-}
-
 // Create folder endpoint (Firebase auto-creates)
 app.post('/upload/create-folder', (req, res) => {
   const { address } = req.query;
@@ -318,7 +146,7 @@ app.get('/download-photos/:address', async (req, res) => {
   }
 });
 
-// ✅ /notify-print: INSTANT response with background processing (WITH GOOGLE DRIVE)
+// ✅ /notify-print: INSTANT response with background processing (WITHOUT GOOGLE DRIVE)
 app.post('/notify-print', async (req, res) => {
   try {
     const { address, photoCount, userDetails, skipToPrint } = req.body;
@@ -341,7 +169,7 @@ app.post('/notify-print', async (req, res) => {
         const [files] = await bucket.getFiles({ prefix: folderPrefix });
         const totalPhotoCount = files.filter(file => file.name !== folderPrefix).length;
 
-        // Background task 1: Upload to Dropbox and Google Drive
+        // Background task 1: Upload to Dropbox only
         const uploadPromise = (async () => {
           try {
             console.log(`📦 Starting uploads for ${folderName}...`);
@@ -353,16 +181,7 @@ app.post('/notify-print', async (req, res) => {
             const filesToUpload = files.filter(file => file.name !== folderPrefix);
             console.log(`📁 Found ${filesToUpload.length} files to upload`);
 
-            // Create Google Drive folder first (in 30-clicks-photos folder)
-            let driveFolder = null;
-            try {
-              // Use the environment variable for the folder ID
-              driveFolder = await createGoogleDriveFolder(folderName, process.env.GOOGLE_DRIVE_FOLDER_ID);
-            } catch (error) {
-              console.error('Error creating Google Drive folder:', error);
-            }
-
-            // Upload to Dropbox and Google Drive sequentially for each file
+            // Upload to Dropbox for each file
             for (let i = 0; i < filesToUpload.length; i++) {
               const file = filesToUpload[i];
               const filename = file.name.split('/').pop();
@@ -393,16 +212,6 @@ app.post('/notify-print', async (req, res) => {
                     }
                     await new Promise(resolve => setTimeout(resolve, backoffDelay));
                   }
-                }
-              }
-
-              // Upload to Google Drive (with error handling)
-              if (driveFolder) {
-                try {
-                  await uploadToGoogleDrive(file.name, filename, driveFolder.id);
-                  console.log(`✅ Uploaded ${filename} to Google Drive`);
-                } catch (error) {
-                  console.error(`❌ Failed to upload ${filename} to Google Drive:`, error);
                 }
               }
               
@@ -446,16 +255,6 @@ app.post('/notify-print', async (req, res) => {
                 <h4>Option 3: Dropbox (Auto-synced)</h4>
                 <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/</code></p>
                 <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 2-3 minutes to complete.</small></p>
-              </div>
-              <div style="background-color: #e1f5fe; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 4: Google Drive (Raw Photos)</h4>
-                <p>📁 Check your Google Drive: <code>/30-clicks-photos/${folderName}/</code></p>
-                <p><small>Raw photos are automatically uploaded to Google Drive for easy access and sharing.</small></p>
-              </div>
-              <div style="background-color: #fce4ec; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 5: Google Drive (Processed Photos)</h4>
-                <p>📁 After Lightroom processing: <code>/30-clicks-processed-photos/${folderName}/</code></p>
-                <p><small>Edited photos will be uploaded here automatically after processing.</small></p>
               </div>
               <p><strong>User Details:</strong></p>
               <ul>
