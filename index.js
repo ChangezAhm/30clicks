@@ -85,11 +85,18 @@ app.post('/upload', (req, res) => {
         albumNumber = req.query.albumNumber || req.body?.userDetails?.currentAlbumNumber || 1;
       }
       
+      // Extract user details from query parameters
+      const postcode = req.query.postcode || '';
+      const houseNumber = req.query.houseNumber || '';
+      const username = req.query.username || '';
+      
       const timestamp = Date.now();
-      const filename = `${timestamp}-${req.file.originalname}`;
+      
+      // Create enhanced filename with album number, postcode, house number, and username
+      const enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${username}_${timestamp}-${req.file.originalname}`;
       
       // Include album subfolder in the path
-      const filePath = `${folderName}/album${albumNumber}/${filename}`;
+      const filePath = `${folderName}/album${albumNumber}/${enhancedFilename}`;
       const fileRef = bucket.file(filePath);
 
       const stream = fileRef.createWriteStream({ metadata: { contentType: req.file.mimetype } });
@@ -223,6 +230,14 @@ app.post('/notify-print', async (req, res) => {
               // Upload to Dropbox (with retry logic)
               // Get album number from the notification data or default to 1
               const albumNumber = req.body?.userDetails?.currentAlbumNumber || 1;
+              
+              // Use the same filename format with album number, postcode, house number, and username
+              // Extract user details from the notification data
+              const postcode = req.body?.userDetails?.postcode || '';
+              const houseNumber = req.body?.userDetails?.houseNumber || '';
+              const username = req.body?.userDetails?.username || '';
+              
+              // The filename from Firebase already includes all the enhanced information
               const dropboxPath = `/30-clicks-import/${folderName}/album${albumNumber}/${filename}`;
               let dropboxSuccess = false;
               let retryCount = 0;
