@@ -213,12 +213,36 @@ app.post('/notify-print', async (req, res) => {
           try {
             console.log(`📦 Starting uploads for ${folderName}...`);
             
-            // Wait for Firebase uploads to settle
-            console.log('⏳ Waiting 20 seconds for Firebase uploads to settle...');
-            await new Promise(resolve => setTimeout(resolve, 20000));
+            // Calculate expected photo count (30 - remaining = photos taken)
+            const expectedPhotoCount = 30 - photoCount;
+            console.log(`⏳ Waiting for all ${expectedPhotoCount} photos to be uploaded to Firebase...`);
             
-            const filesToUpload = files.filter(file => file.name !== folderPrefix);
-            console.log(`📁 Found ${filesToUpload.length} files to upload`);
+            // Wait until we have all expected photos in Firebase
+            let attempts = 0;
+            const maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max wait
+            let currentFiles = [];
+            
+            while (attempts < maxAttempts) {
+              const [latestFiles] = await bucket.getFiles({ prefix: folderPrefix });
+              currentFiles = latestFiles.filter(file => file.name !== folderPrefix);
+              
+              console.log(`🔍 Attempt ${attempts + 1}: Found ${currentFiles.length}/${expectedPhotoCount} photos in Firebase`);
+              
+              if (currentFiles.length >= expectedPhotoCount) {
+                console.log(`✅ All ${expectedPhotoCount} photos found in Firebase!`);
+                break;
+              }
+              
+              attempts++;
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before checking again
+            }
+            
+            if (currentFiles.length < expectedPhotoCount) {
+              console.warn(`⚠️ Timeout: Only found ${currentFiles.length}/${expectedPhotoCount} photos after ${maxAttempts} attempts`);
+            }
+            
+            const filesToUpload = currentFiles;
+            console.log(`📁 Proceeding with ${filesToUpload.length} files to upload`);
 
             // Upload to Dropbox for each file
             for (let i = 0; i < filesToUpload.length; i++) {
