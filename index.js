@@ -214,8 +214,8 @@ app.post('/notify-print', async (req, res) => {
             console.log(`📦 Starting uploads for ${folderName}...`);
             
             // Wait for Firebase uploads to settle
-            console.log('⏳ Waiting 5 seconds for Firebase uploads to settle...');
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            console.log('⏳ Waiting 20 seconds for Firebase uploads to settle...');
+            await new Promise(resolve => setTimeout(resolve, 20000));
             
             const filesToUpload = files.filter(file => file.name !== folderPrefix);
             console.log(`📁 Found ${filesToUpload.length} files to upload`);
