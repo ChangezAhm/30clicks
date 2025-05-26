@@ -117,17 +117,23 @@ app.post('/upload', (req, res) => {
       const username = req.query.username || '';
       const email = req.query.email || username; // Use email if provided, fallback to username
       
-      const timestamp = Date.now();
+      // Use the exact filename from the frontend (already contains photo ID)
+      // This ensures consistency between frontend photo IDs and backend filenames
+      let enhancedFilename = req.file.originalname;
       
-      // Backward compatibility: Check if email param exists (new app) vs old app
-      const isNewAppVersion = req.query.email !== undefined;
-      
-      if (isNewAppVersion) {
-        // New app version: include email in filename
-        var enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${email}_${username}_${timestamp}-${req.file.originalname}`;
-      } else {
-        // Old app version: use old filename format
-        var enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${username}_${timestamp}-${req.file.originalname}`;
+      // If the filename doesn't contain the album number, add it for legacy support
+      if (!enhancedFilename.includes(`album${albumNumber}_`)) {
+        const timestamp = Date.now();
+        // Backward compatibility: Check if email param exists (new app) vs old app
+        const isNewAppVersion = req.query.email !== undefined;
+        
+        if (isNewAppVersion) {
+          // New app version: include email in filename
+          enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${email}_${username}_${timestamp}-${req.file.originalname}`;
+        } else {
+          // Old app version: use old filename format
+          enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${username}_${timestamp}-${req.file.originalname}`;
+        }
       }
       
       // Include album subfolder in the path
