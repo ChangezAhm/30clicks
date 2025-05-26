@@ -1,7 +1,6 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
 const archiver = require('archiver');
 const { bucket } = require('./firebase-config');
 const { uploadToDropboxFromFirebase, uploadToDropboxWithRetry, dropboxAuth } = require('./dropbox-utils');
@@ -30,14 +29,36 @@ app.use(cors({
 
 app.use(express.json());
 
-// Configure email transport
-const transport = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD
+// Manual review alert function for incomplete orders
+async function sendManualReviewAlert(address, userDetails, actualCount, expectedCount) {
+  try {
+    const alertData = {
+      timestamp: new Date().toISOString(),
+      address: address,
+      userDetails: userDetails,
+      photosFound: actualCount,
+      photosExpected: expectedCount,
+      uploadSuccessRate: Math.round((actualCount / expectedCount) * 100),
+      status: 'REQUIRES_MANUAL_REVIEW'
+    };
+    
+    console.log('🚨 MANUAL REVIEW ALERT:', JSON.stringify(alertData, null, 2));
+    console.log('📧 TODO: Implement email/notification system to alert admin of incomplete orders');
+    console.log('📋 SUGGESTED ACTIONS:');
+    console.log(`   1. Check Firebase Storage for folder: ${address}`);
+    console.log(`   2. Verify user took ${expectedCount} photos vs ${actualCount} found`);
+    console.log(`   3. Manually process partial order if appropriate`);
+    console.log(`   4. Contact user if photos are permanently lost`);
+    
+    // TODO: Add actual notification system here
+    // await emailAlert(alertData);
+    // await slackAlert(alertData);
+    // await databaseLog(alertData);
+    
+  } catch (error) {
+    console.error('Error sending manual review alert:', error);
   }
-});
+}
 
 // Set up multer for memory storage
 const upload = multer({
@@ -77,6 +98,11 @@ app.post('/upload', (req, res) => {
       // Clean up the address for folder name
       const folderName = address.replace(/[^a-z0-9]/gi, '_');
       
+      // Note: Address format depends on app version:
+      // - Old app: "houseNumber_postcode" 
+      // - New app: "email_houseNumber_postcode"
+      // Backend accepts both formats automatically
+      
       // Check if this address already includes album info (from client)
       // If not, try to get it from the query parameters
       let albumNumber = 1;
@@ -89,11 +115,20 @@ app.post('/upload', (req, res) => {
       const postcode = req.query.postcode || '';
       const houseNumber = req.query.houseNumber || '';
       const username = req.query.username || '';
+      const email = req.query.email || username; // Use email if provided, fallback to username
       
       const timestamp = Date.now();
       
-      // Create enhanced filename with album number, postcode, house number, and username
-      const enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${username}_${timestamp}-${req.file.originalname}`;
+      // Backward compatibility: Check if email param exists (new app) vs old app
+      const isNewAppVersion = req.query.email !== undefined;
+      
+      if (isNewAppVersion) {
+        // New app version: include email in filename
+        var enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${email}_${username}_${timestamp}-${req.file.originalname}`;
+      } else {
+        // Old app version: use old filename format
+        var enhancedFilename = `album${albumNumber}_${postcode}_${houseNumber}_${username}_${timestamp}-${req.file.originalname}`;
+      }
       
       // Include album subfolder in the path
       const filePath = `${folderName}/album${albumNumber}/${enhancedFilename}`;
@@ -144,6 +179,7 @@ app.post('/upload/create-folder', (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to process folder request', details: error.message });
   }
 });
+
 
 // Download photos endpoint
 app.get('/download-photos/:address', async (req, res) => {
@@ -202,46 +238,151 @@ app.post('/notify-print', async (req, res) => {
         const albumNumber = userDetails?.currentAlbumNumber || 1;
         
         // Include album folder in the path
-        const folderPrefix = `${folderName}/album${albumNumber}/`;
+        let folderPrefix = `${folderName}/album${albumNumber}/`;
         
         // Get files from this specific album folder
-        const [files] = await bucket.getFiles({ prefix: folderPrefix });
-        const totalPhotoCount = files.filter(file => file.name !== folderPrefix).length;
+        // Try multiple folder formats for backward compatibility
+        let files = [];
+        let totalPhotoCount = 0;
+        
+        // Try current folder format first
+        const [currentFiles] = await bucket.getFiles({ prefix: folderPrefix });
+        files = currentFiles.filter(file => file.name !== folderPrefix);
+        
+        if (files.length === 0) {
+          // If no files found, try legacy folder formats
+          console.log(`🔍 No files found in ${folderPrefix}, trying legacy formats...`);
+          
+          // Extract user details to try different folder combinations
+          const addressParts = address.split('_');
+          
+          if (addressParts.length >= 2) {
+            // Try different legacy formats based on address parts
+            const legacyFormats = [];
+            
+            if (addressParts.length === 2) {
+              // Current format: "houseNumber_postcode" - try with street names
+              const houseNumber = addressParts[0];
+              const postcode = addressParts[1];
+              
+              // Look for folders that start with houseNumber and end with postcode
+              const [allFiles] = await bucket.getFiles();
+              const possibleFolders = allFiles
+                .map(file => file.name.split('/')[0])
+                .filter((folder, index, arr) => arr.indexOf(folder) === index) // unique folders
+                .filter(folder => folder.startsWith(houseNumber) && folder.endsWith(postcode));
+              
+              console.log(`🔍 Found possible legacy folders:`, possibleFolders);
+              
+              for (const legacyFolder of possibleFolders) {
+                const legacyPrefix = `${legacyFolder}/album${albumNumber}/`;
+                const [legacyFiles] = await bucket.getFiles({ prefix: legacyPrefix });
+                const legacyPhotoFiles = legacyFiles.filter(file => file.name !== legacyPrefix);
+                
+                if (legacyPhotoFiles.length > 0) {
+                  console.log(`✅ Found ${legacyPhotoFiles.length} photos in legacy folder: ${legacyFolder}`);
+                  files = legacyPhotoFiles;
+                  // Update folderPrefix for the upload loop
+                  folderPrefix = legacyPrefix;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        totalPhotoCount = files.length;
+        console.log(`📁 Final folder: ${folderPrefix} with ${totalPhotoCount} photos`);
+
+        // EXACT MATCH VERIFICATION: Wait until Firebase has exactly the number of photos taken
+        const photosTaken = 10 - photoCount; // Counter tells us exactly how many photos user took
+        console.log(`🎯 EXACT MATCH REQUIRED: User took ${photosTaken} photos, waiting for Firebase to contain exactly ${photosTaken} photos`);
+        
+        // Wait up to 60 minutes for all photos to upload (handles very poor connectivity and offline scenarios)
+        const maxWaitMinutes = 60;
+        let waitMinutes = 0;
+        
+        while (waitMinutes < maxWaitMinutes && totalPhotoCount < photosTaken) {
+          if (waitMinutes === 0) {
+            console.log(`⏳ STARTING VERIFICATION: Found ${totalPhotoCount}/${photosTaken} photos initially`);
+          }
+          
+          // Wait 1 minute between checks
+          await new Promise(resolve => setTimeout(resolve, 60000));
+          waitMinutes++;
+          
+          // Re-check for photos in current folder
+          const [retryFiles] = await bucket.getFiles({ prefix: folderPrefix });
+          files = retryFiles.filter(file => file.name !== folderPrefix);
+          totalPhotoCount = files.length;
+          
+          // Also check legacy folders if current folder has fewer photos
+          if (totalPhotoCount < photosTaken) {
+            const addressParts = address.split('_');
+            if (addressParts.length === 2) {
+              const houseNumber = addressParts[0];
+              const postcode = addressParts[1];
+              
+              const [allFiles] = await bucket.getFiles();
+              const possibleFolders = allFiles
+                .map(file => file.name.split('/')[0])
+                .filter((folder, index, arr) => arr.indexOf(folder) === index)
+                .filter(folder => folder.startsWith(houseNumber) && folder.endsWith(postcode));
+              
+              for (const legacyFolder of possibleFolders) {
+                const legacyPrefix = `${legacyFolder}/album${albumNumber}/`;
+                const [legacyFiles] = await bucket.getFiles({ prefix: legacyPrefix });
+                const legacyPhotoFiles = legacyFiles.filter(file => file.name !== legacyPrefix);
+                
+                if (legacyPhotoFiles.length > totalPhotoCount) {
+                  console.log(`📁 Found ${legacyPhotoFiles.length} photos in legacy folder: ${legacyFolder}`);
+                  files = legacyPhotoFiles;
+                  folderPrefix = legacyPrefix;
+                  totalPhotoCount = legacyPhotoFiles.length;
+                  break;
+                }
+              }
+            }
+          }
+          
+          // Log progress every 5 minutes
+          if (waitMinutes % 5 === 0) {
+            console.log(`⏳ ${waitMinutes}min elapsed: Found ${totalPhotoCount}/${photosTaken} photos`);
+          }
+          
+          // SUCCESS: Found exact number of photos
+          if (totalPhotoCount >= photosTaken) {
+            console.log(`✅ EXACT MATCH ACHIEVED: Found ${totalPhotoCount}/${photosTaken} photos after ${waitMinutes} minutes`);
+            break;
+          }
+        }
+        
+        // Final verification
+        if (totalPhotoCount < photosTaken) {
+          console.log(`❌ VERIFICATION FAILED: Only found ${totalPhotoCount}/${photosTaken} photos after ${maxWaitMinutes} minutes`);
+          console.log(`🚨 INCOMPLETE ORDER: User took ${photosTaken} photos but only ${totalPhotoCount} reached Firebase`);
+          
+          // Send manual review alert
+          await sendManualReviewAlert(address, userDetails, totalPhotoCount, photosTaken);
+          return; // Don't process incomplete orders
+        }
+        
+        // EXACT MATCH CONFIRMED - proceed with processing
+        console.log(`🎉 PROCEEDING TO PRINT: Confirmed ${totalPhotoCount} photos match ${photosTaken} photos taken`);
 
         // Background task 1: Upload to Dropbox only
         const uploadPromise = (async () => {
           try {
             console.log(`📦 Starting uploads for ${folderName}...`);
             
-            // Calculate expected photo count (30 - remaining = photos taken)
-            const expectedPhotoCount = 30 - photoCount;
-            console.log(`⏳ Waiting for all ${expectedPhotoCount} photos to be uploaded to Firebase...`);
+            // Use actual photo count instead of calculated expected count
+            const actualPhotoCount = totalPhotoCount;
+            console.log(`📊 Processing ${actualPhotoCount} photos found in Firebase...`);
             
-            // Wait until we have all expected photos in Firebase
-            let attempts = 0;
-            const maxAttempts = 60; // 60 attempts * 2 seconds = 2 minutes max wait
-            let currentFiles = [];
-            
-            while (attempts < maxAttempts) {
-              const [latestFiles] = await bucket.getFiles({ prefix: folderPrefix });
-              currentFiles = latestFiles.filter(file => file.name !== folderPrefix);
-              
-              console.log(`🔍 Attempt ${attempts + 1}: Found ${currentFiles.length}/${expectedPhotoCount} photos in Firebase`);
-              
-              if (currentFiles.length >= expectedPhotoCount) {
-                console.log(`✅ All ${expectedPhotoCount} photos found in Firebase!`);
-                break;
-              }
-              
-              attempts++;
-              await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds before checking again
-            }
-            
-            if (currentFiles.length < expectedPhotoCount) {
-              console.warn(`⚠️ Timeout: Only found ${currentFiles.length}/${expectedPhotoCount} photos after ${maxAttempts} attempts`);
-            }
-            
-            const filesToUpload = currentFiles;
+            // Since we already found the photos, use them directly
+            // No need to wait - photos are already confirmed to exist
+            const filesToUpload = files;
+            console.log(`✅ Using ${filesToUpload.length} photos already found in Firebase`);
             console.log(`📁 Proceeding with ${filesToUpload.length} files to upload`);
 
             // Upload to Dropbox for each file
@@ -301,63 +442,8 @@ app.post('/notify-print', async (req, res) => {
           }
         })();
 
-        // Background task 2: Send email (parallel)
-        const emailPromise = (async () => {
-          try {
-            // Get album number from notification data
-            const albumNumber = req.body?.userDetails?.currentAlbumNumber || 1;
-            const albumText = `Album #${albumNumber}`;
-            
-            const emailSubject = skipToPrint 
-              ? `⏩ PRINT REQUEST: ${address} (${albumText} - ${totalPhotoCount} photos - SKIPPED TO PRINT)`
-              : `✅ PRINT REQUEST: ${address} (${albumText} - ${totalPhotoCount} photos - FULL ROLL)`;
-
-            const emailHtml = `
-              <h2>🖨️ New Print Request</h2>
-              <p><strong>Address:</strong> ${address}</p>
-              <p><strong>Album Number:</strong> ${albumNumber}</p>
-              <p><strong>Total Photos:</strong> ${totalPhotoCount}</p>
-              <p><strong>Photos Taken:</strong> ${actualPhotoCount}/30</p>
-              <p><strong>Status:</strong> ${skipToPrint ? '⏩ Skipped to print' : '✅ Completed full roll'}</p>
-              <h3>📥 Download Options:</h3>
-              <div style="background-color: #e8f4fd; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 1: One-Click Download (Recommended)</h4>
-                <p><a href="https://three0clicks.onrender.com/download-photos/${address}?albumNumber=${albumNumber}" style="background-color: #4285f4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">📁 Download All Photos as ZIP</a></p>
-              </div>
-              <div style="background-color: #f0f0f0; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 2: Manual Download</h4>
-                <p>1. Go to <a href="https://console.cloud.google.com/storage/browser/clicks-25b5a.firebasestorage.app/${folderName}/album${albumNumber}">Google Cloud Console</a></p>
-                <p>2. Select all photos individually and download</p>
-              </div>
-              <div style="background-color: #e8f5e9; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <h4>Option 3: Dropbox (Auto-synced)</h4>
-                <p>📁 Check your Dropbox: <code>/30-clicks-import/${folderName}/album${albumNumber}/</code></p>
-                <p><small>Photos are automatically uploaded to Dropbox for your convenience. This may take 2-3 minutes to complete.</small></p>
-              </div>
-              <p><strong>User Details:</strong></p>
-              <ul>
-                <li><strong>Username:</strong> ${userDetails.username}</li>
-                <li><strong>Postcode:</strong> ${userDetails.postcode}</li>
-                <li><strong>House Number:</strong> ${userDetails.houseNumber}</li>
-              </ul>
-              <p><strong>Timestamp:</strong> ${new Date().toLocaleString()}</p>
-            `;
-
-            await transport.sendMail({
-              from: process.env.EMAIL_USER,
-              to: process.env.FOUNDER_EMAIL,
-              subject: emailSubject,
-              html: emailHtml
-            });
-
-            console.log('📧 Print notification email sent successfully');
-          } catch (error) {
-            console.error('Email sending error:', error);
-          }
-        })();
-
-        // Run both tasks in parallel
-        await Promise.all([uploadPromise, emailPromise]);
+        // Run upload task
+        await uploadPromise;
         console.log('🎉 All background tasks completed for', address);
 
       } catch (error) {
