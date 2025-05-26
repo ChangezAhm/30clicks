@@ -121,8 +121,11 @@ app.post('/upload', (req, res) => {
       // This ensures consistency between frontend photo IDs and backend filenames
       let enhancedFilename = req.file.originalname;
       
-      // If the filename doesn't contain the album number, add it for legacy support
-      if (!enhancedFilename.includes(`album${albumNumber}_`)) {
+      // Check if this is a new-style photo ID (starts with album number and contains _photo)
+      const isNewStylePhotoId = enhancedFilename.includes(`${albumNumber}_`) && enhancedFilename.includes('_photo');
+      
+      // If it's not a new-style photo ID, add legacy timestamp for backward compatibility
+      if (!isNewStylePhotoId) {
         const timestamp = Date.now();
         // Backward compatibility: Check if email param exists (new app) vs old app
         const isNewAppVersion = req.query.email !== undefined;
